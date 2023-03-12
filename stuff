@@ -1,0 +1,1811 @@
+'''
+    Title:analysis of yum for better migration work
+    Author:K1220249
+    2023 03 13 02:27
+    
+    
+
+    Call Stack
+        blahblah~~~~ 
+                we are going to fill with some call stack associated with below
+        yumcommands
+                RepoPkgsCommand based on YumCommand
+                    doCommand Method
+                        base.install (base is YumBase abstract class)
+        YumBase based on depsolve.Depsolve,we don't care about that
+                install cursor is here
+'''
+
+'''
+    rpmutils.arch module
+'''
+def archDifference(myarch, targetarch):
+    #base case
+    if myarch == targetarch:
+        return 1
+    
+    if myarch in arches:
+        ret = archDifference(arches[myarch],targetarch)
+        if ret != 0 
+            return ret + 1   
+        return 0
+
+    return 0
+
+'''
+    misc module
+'''
+    def newestInList(pkgs):
+
+        ret = [pkgs.pop()]
+        newest = ret[0]
+        for pkg in pkgs:
+            if pkg.verGT(newest):
+                ret = [pkg]
+                newest = pkg
+            elif pkg.verEQ(newest):
+                ret.append(pkg)
+        return ret
+'''
+    rpmutils.miscutils module
+'''
+def compareEVR((e1,v1,r1), (e2,v2,r2)):
+    #return 1 : a is newer than b
+    # 0: a and b are the same version
+    # -1 b is newer than a
+    if e1 is None:
+        e1 = '0'
+    else:
+        e1 = str(e1)
+    v1 = str(v1)
+    r1 = str(r1)
+    if e2 is None:
+        e2 = '0'
+    else:
+        e2 = str(e2)
+    v2 = str(v2)
+    r2 = str(r2)
+    
+    rc = rpm.labelCompare((e1,v1,r1),(e2,v2,r2))
+
+    return rc
+'''
+    packages module
+'''
+def comparePoEVR(po1,po2):
+
+    (e1,v1,r1) = (po1.epoch, po1.version, po1.release)
+    (e2,v2,r2) = (po2.epoch, po2.version, po2.release)
+    return rpmUtils.miscutils.compareEVR((e1,v1,r1),(e2,v2,r2))
+
+def comparePoEVREQ(po1,po2):
+    """
+    Compare two Package or PackageEVR objects for equality.
+    """
+    (e1,v1,r1) = (po1.epoch,po1.version,po1.release)
+    (e2,v2,r2) = (po2.epoch,po2.version,po2.release)
+    if r1 != r2: return False
+    if v1 != v2: return False
+    if e1 != e2: return False
+    return True
+
+
+
+
+class RpmBase(object):
+
+    def __init__(self):
+        #provide,require,conflict,obsolete
+        self.prco = {}
+        # (name, flag, (e,v,r))
+        self.prco['obsoletes'] = [] 
+        self.prco['conflicts'] = [] 
+        self.prco['requires'] = [] 
+        self.prco['suggests'] = []
+        self.prco['enhances'] = []
+        self.prco['recommends'] = []
+        self.prco['supplements'] = []
+        
+        self.files = {}
+        self.files['file'] = []
+        self.files['dir'] = []
+        self.files['ghost'] = []
+        self._changelog = [] # (ctime, cname, ctext)
+        self.licenses = []
+        self._hash = None
+    
+    def returnPrco(self, prcotype,printable=False):
+
+        prcotype = {"weak_requires" : "recommends",
+                    "info_requires" : "suggests",
+                    "weak_reverse_requires" : "supplements",
+                    "info_reverse_requires" : "enhances"}.get(prcotype,prcotype)
+        
+        prcos = self.prco.get(prcotype,[])
+
+        if printable:
+            results = []
+            for prco in procs:
+                if not prco[0]:
+                    continue
+                results.append(misc.prco_tupe_to_string(prco))
+            return results
+        
+        return prcos
+
+    def inPrcoRange(self, prcotype, reqtuple):
+        return bool(self.matchingPrcos(prcotype, reqtuple))
+
+
+    def matchingPrcos(self, prcotype, reqtuple):
+        (reqn, reqf, (reqe,reqv,reqr)) = reqtuple
+        
+        result = []
+        for (n,f,(e,v,r)) in self.returnPrco(prcotype):
+                if not i18n.str_eq(reqn,n):
+                    continue
+
+                if f == '=':
+                    f = 'EQ'
+                if f != 'EQ' and prcotype == 'provides':
+
+                    if e is None:
+                        e = self.epoch
+                    if v is None:
+                        v = self.ver
+                    if r is None:
+                        r = self.rel
+                
+                matched = rpmUtils.miscutils.rangeCompare(
+                    reqtuple, (n,f,(e,v,r))
+                )
+                if matched:
+                    result.append((n,f,(e,v,r)))
+        return result
+
+    def obsoltedBy(self, obsoleters, limit=0):
+
+        provtup = (self.name, 'EQ', (self.epoch, self.version, self.release))
+        ret = []
+        for obspo in obsoleters:
+            if obspo.inPrcoRange('obsoletes',provtup):
+                ret.append(obspo)
+                if limit and len(ret) > limit:
+                    break
+        return ret
+
+class PackageObject(object):
+    """Base Package Object"""
+
+    def __init__(self):
+        self.name = None
+        self.version = None
+        self.release = None
+        self.epoch = None
+        self.arch = None
+        self._checksums = [] # (type, checksum, id(0,1))
+
+    def verCMP(self,other):
+
+        if not other:
+            return 1
+        ret = cmp(self.name, other.name)
+        if ret == 0:
+            ret = comparePoEVR(self, other)
+        return ret
+
+    def verEQ(self, other):
+        if not other:
+            return None
+        ret = cmp(self.name, other.name)
+        if ret !=0:
+            return False
+        return comparePoEVREQ(self, other)
+    
+    def verNE(self,other):
+
+        if not other:
+            return None
+        return not self.verEQ(other)
+
+    def verLT(self,other):
+        #other < ours
+        return self.verCMP(other) < 0
+
+    def verLE(self,other):
+        # other <= ours
+        return self.verCMP(other) <= 0
+    
+    def verGT(self,other):
+        # other > ours
+        reutrn self.verCMP(other) > 0
+    
+    def verGE(self,other):
+        #other >= ours
+        return self.verCMP(other) >=0
+
+
+class YumAvailablePackage(PackageObject,RpmBase):
+    
+    def __init__(self, repo, pkgdict = None):
+        PackageObject.__init__(self)
+        RpmBase.__init__(self)
+
+        self.repoid = repo.id
+        self.repo = repo
+        self.state = None
+        self._loadedfiles = False
+        self._verify_local_pkg_cache = None
+
+        if pkgdict != None:
+            self.importFromDict(pkgdict)
+            self.ver = self.version
+            self.rel = self.release
+        self.pkgtup = (self.name, self.arch, self.epoch, self.version, self.release)
+
+'''
+    packageSack module
+'''
+def packagesNewestByNmae(pkgs):
+
+    newest = {}
+    for pkg in pkgs:
+        key = pkg.name
+
+        cval = 1
+        if key in newest:
+            cval = pkg.verCMP(newest[key][0])
+        if cval > 0:
+            newest[key] = [pkg]
+        elif cval == 0:
+            newest[key].append(pkg)
+    ret = []
+    for vals in newest.itervalues():
+        ret.extend(vals)
+    return ret
+'''
+    rpmsack module
+'''
+    def returnNewestByNameArch(self, naTup=None, patterns=None):
+        if not naTup:
+            return
+
+        (name, arch) = naTup
+
+        allpkg = self._search(name=name, arch=arch)
+
+        if not allpkg:
+            raise Errors.PacakageSackError, 'No Package Matching %s' % name
+        
+        return [po.pkgtup for po in misc.newestInList(allpkg)]
+
+    def returnNewestByName(self, name=None):
+        if not name:
+            return
+
+        allpkgs = self._search(name=name)
+
+        if not allpkgs:
+            raise Errors.PacakageSackError, 'No Package Matching %s' % name
+
+        return misc.newestInList(allpkgs)
+
+
+    #rpmUtils.transaction module
+    class TransactionWrapper:
+        def __init__(self,root='/'):
+            self.ts = rpm.TransactionSet(root)
+            self._methods = ['check',
+                            'order',
+                            'addErase',
+                            'addInstall',
+                            'run',
+                            'pgpImportPubkey',
+                            'pgpPrtPkts',
+                            'problems',
+                            'setFlags',
+                            'setVSFlags',
+                            'setProbFilter',
+                            'hdrFromFdno',
+                            'next',
+                            'clean']
+            self.tsflags = []
+            self.open = True
+    
+        def __del__(self):
+            self.close()
+    
+    
+    
+    def initReadOnlyTransaction(root='/'):
+        read_ts = TransactionWrapper(root=root)
+        read_ts.pushVSFlags((rpm.RPMVSF_NOSIGNATURES|rpm._RPMVSF_NODIGESTS))
+        reutrn read_ts
+
+
+    class RPMDBAdditionalData(object):
+        '''
+            class for access to the additional data not able to be stored in the
+            rpmdb
+        '''
+        #dir : /var/lib/yum/yumdb/
+        #pkgs stored in name[0]/name[1]/pkgid-name-ver-rel-arch dirs
+        #dirs have  cachefile/piece we're keeping
+        # repoid, install reason, status, ~anyting ?
+
+        def __init__(self, db_path='/var/lib/yum/yumdb', version_path=None):
+            self.conf = misc.GenericHolder() # no care
+            self.conf.db_path = db_path
+            self.conf.version_path = version_path
+            self.conf.writable = False
+
+            self._packages = {} #pkgid = dir
+            if not os.path.exist(self.conf.db_path):
+                try:
+                    _makedirs_no_umask(self.conf.db_path)
+                
+                except (IOError, OSError), e:
+                    pass
+            else:
+                if os.access(self.conf.db_path, os.W_OK)
+                    self.conf.writable = True
+
+            self.yumdb_cache = {'attr' : {}}
+
+    class RPMInstalledPackage(YumInstalledPackage):
+
+        def __init__(self, rpmhdr, index, rpmdb):
+            self._has_hdr = True
+            YumInstalledPackage.__init__(self, rpmhdr, yumdb=rpmdb.yumdb)
+
+            self.idx = index
+            self.rpmdb = rpmdb
+
+            self._has_hdr = False
+            del self.hdr
+
+            
+    class RPMDBPackageSack(PackageSackBase):
+        '''
+        Represent rpmdb as a packagesack
+        '''
+
+        '''
+            copy and paste 
+        '''
+        DEP_TABLE = { 
+            'requires'  : (rpm.RPMTAG_REQUIRENAME,
+                           rpm.RPMTAG_REQUIREVERSION,
+                           rpm.RPMTAG_REQUIREFLAGS),
+            'provides'  : (rpm.RPMTAG_PROVIDENAME,
+                           rpm.RPMTAG_PROVIDEVERSION,
+                           rpm.RPMTAG_PROVIDEFLAGS),
+            'conflicts' : (rpm.RPMTAG_CONFLICTNAME,
+                           rpm.RPMTAG_CONFLICTVERSION,
+                           rpm.RPMTAG_CONFLICTFLAGS),
+            'obsoletes' : (rpm.RPMTAG_OBSOLETENAME,
+                           rpm.RPMTAG_OBSOLETEVERSION,
+                           rpm.RPMTAG_OBSOLETEFLAGS)
+            }
+
+
+        __cache_rpmdb__ = True
+
+
+        def __init__(self, root='/', releasever=None, cachedir=None,
+            persisdir='/var/lib/yum'):
+            self.root = root
+            self._idx2pkg = {}
+            self._name2pkg = {}
+            self._pkgnames_loaded = set()
+            self._tup2pkg = {}
+            self._completely_loaded = False
+            self._pkgname_fails = set()
+            self._pkgmatch_fails = set()
+            self._provmatch_fails = set()
+            self._simple_pkgtup_list = []
+            self._get_pro_cache = {}
+            self._get_req_cache = {}
+            self._loaded_gpg_keys = False
+            if cachedir is None:
+                cachedir =  persisdir + "/rpmdb-indexes"
+            #not implemented
+            self.setCacheDir(cachedir)
+            if not os.path.normpath(persistdir).startswith(self.root):
+                self._persistdir = root + '/' + persistdir
+            else:
+                self._persistdir = persisdir
+            #/var/lib/yum
+            if hasattr(rpm,'expandMacro'):
+                dppath = rpm.expandMacro('%_dbpath')
+            else:
+                dbpath = '/var/lib/rpm'
+            #default rpm dbpath is /var/lib/rpm
+            self._rpmdbpath = os.path.normpath(root + '/' + dbpath)
+            self._have_cached_rpmdv_data = None
+            self._cached_conflicts_data = None
+            #Store the result of what happes, if a transaction completes.
+            self._trans_cache_store = {}
+            self.ts = None
+            self.releasever = releasever
+            self.auto_close = False
+
+            self._cached_rpmdb_mtime = None
+
+            self._cache = {
+                'provides'  : {},
+                'requires' : {},
+                'conflicts' : {},
+                'obsoletes' : {},
+            }
+            #var/lib/yum/yumdb
+            addlab_path = os.path.normpath(self._persistdir + '/yumdb')
+            version_path = os.path.normpath(cachedir + '/version')
+            self.yumdb = RPMDBAdditionalData(dp_path = addlab_path,
+                                        version_path=version_path
+                                            )
+        #it maybed wrapper for rpmtransaction dbmatch method
+        def dbMatch(self, *args, **kwds):
+            if 'patterns' in kwds:
+                patterns = kwds.pop('patterns')
+            else:
+                patterns = []
+            
+            #dbmatch method in rpmtransaction
+            mi = self.ts.dbMatch(*args, **kwds)
+            for (tag,tp,pat) in patterns:
+                mi.pattern(tag, tp, pat)
+            return mi
+
+    def _get_packages(self, *args, **kwds):
+
+        ts = self.readOnlyTS
+
+        mi = ts.dbMatch(*args, **kwds)
+        
+        for h in mi:
+            if h['name'] != 'gpg-pubkey' :
+                yield (h, mi.instance())
+        
+        del mi #free and disconnect tr
+
+        if self.auto_close:
+            self.ts.close()
+
+    def readOnlyTS(self):
+        if not self.ts:
+            self.ts = initReadOnlyTransaction(root=self.root)
+        if not self.ts.open:
+            self.ts = initReadOnlyTransaction(root=self.root)
+        return self.ts
+
+    def _makePackageObject(self,hdr,index):
+            if index in self._idx2pkg: # maps index to package 
+                return self._idx2pkg[index]
+            po = RPMInstalledPackage(hdr, index, self)
+            self._idx2pkg[index] = po
+            self._name2pkg.setdefault(po.name, []).append(po)
+            self._tup2pkg[po.pkgtup] = po #maps tuple to package
+            if self.__cache_rpmdb__ and self.__cahced_rpmdb_mtime is None:
+                #/var/lib/rpm/Packages
+                rpmdbfname = self._rpmdbpath + "/Packages"
+                self._cached_rpmdb_mtime = os.path.getmtime(rpmdbfname)
+            
+            return po
+
+    def _search(self, name=None,epoch=None,ver=None,rel=None,arch=None):
+        '''List of matching packages, to zero or more of NEVRA.'''
+        if name is not None and name in self._pkgname_fails:
+            return []
+
+        pkgtup = (name,arch,epoch,ver,rel)
+        if pkgtup in self._tup2pkg:
+            #_tup2pkg's type is dict
+            return [self._tup2pkg[pkgtup]]
+        
+        #it maybe be use of cache 
+        loc = locals() #return local sym table (it sets in local scope in module)
+        ret = []
+
+        if self._completely_loaded or name in self._pkgnames_loaded:
+            if name is not None:
+                #_name2pkg's thpe is dict
+                pkgs = self._name2pkg.get(name,[])
+                if not pkgs: #is empty?
+                    self._pkgname_failes.add(name)
+            else:
+                pkgs = self.returnPackages()
+            for po in pkgs:
+                #assumming that, listed atoms in tuple have been loaded once before 
+                #except name because we check that  above
+                for tag in ('arch','rel','ver','epoch'):
+                    if loc[tag] is not None and loc[tag] != getattr(po,tag):
+                        break
+                    else:
+                        ret.append(po)
+            return ret
+
+        ts = self.readOnlyTS()
+        if name is not None:
+            mi = self._get_packages('name', name)
+        elif arch is not None:
+            mi = self._get_packages('arch', arch)
+        else:
+            mi = self._get_packages()
+            #full loaded packages
+            self._completely_loaded = True
+        
+        done = False
+        for hdr, idx in mi:
+            po = self._makePackageObject(hdr, idx)
+            '''
+                We create Po(packageobject) out of all matching names, even
+                if we don't return then.
+            '''            
+            self._pkgnames_loaded.add(po.name)
+            done = True
+
+            for tag in ('arch','rel','ver','epoch'):
+                if loc[tag] is not None and loc[tag] != getattr(po,tag):
+                    break
+                else:
+                    ret.append(po)
+       
+        if not done and name is no None:
+            self._pkgname_fails.add(name)
+
+        return ret
+
+    def searchNevra(self, name=None, epoch=None, ver=None, rel=None, arch=None):
+        return self._search(name, epoch, ver, rel, arch)
+
+
+
+
+'''
+    depsolve class
+    we need to analysis these part,because it contains things calculate the score 
+    and that effect entire process
+'''
+    def _compare_providers(self, pkgs, reqpo, req=None):
+
+        self.verbose_logger.log(logginglevels.DEBUG_4,
+                _("Running compare_providers() for %s") %(str(pkgs)))
+
+        def _common_sourcerpm(x,y):
+            if not hasattr(x,'sourcerpm'):
+                return False
+            if not hasattr(y,'sourcerpm'):
+                return False
+            return x.sourcerpm == y.sourcerpm
+
+        def _weak_req(x,y):
+            if y is None:
+                return False
+            for ydep in y.provides:
+                if x.checkPrco('weak_requires',ydep):
+                    return True
+            for xdep in x.provides:
+                if y.checkPrco('weak_reverse_requires',xdep):
+                    return True
+            
+            return False
+            
+
+        def _compare_arch_distance(x,y,req_compare_arch):
+            # take X and Y package objects
+            # determine which has a closer archdistance to compare_arch
+
+            x_dist = archDifference(req_compare_arch,x.arch)
+            if self.arch.multilib:
+                if x_dist ==0: #noarch case so using that y above
+                    self.verbose_logger(logginglevels.DEBUG_4,
+                    _("BETTER ARCH IN PO %S") %(y))
+                    return y
+            
+            y_dist = archDifference(req_compare_arch, y.arch)
+            if y_dist > 0 and x_dist > y_dist:
+                self.verbose_logger(logginglevels.DEBUG_4,
+                _("better arch in po %s") %(y))
+
+                return y
+            if y_dist == x_dist:
+                return None
+            
+            return x
+
+        # Actual start of _compare_providers().
+
+        #pull unique pkg list out dict below
+        unique_nevra_pkgs = {}
+        for pkg in pkgs:
+            if (pkg.pkgtup in unique_nevra_pkgs and
+                unique_nevra_pkgs[pkg.pkgtup].repo <= pkg.repo):
+                continue
+            unique_nevra_pkgs[pkg.pkgtup] = pkg
+        
+        
+        pkgs = unique_nevra_pkgs.values()
+
+        pkgresults = {}
+        penalize = set()
+
+
+        #initialize pkg score
+        for pkg in pkgs:
+            pkgresults[pkg] = 0
+
+        #where? cant find anywhere,no upscaded, no referenced
+        #maybe be deleted
+        self.plugins.run("compare_providers",providers_dict=pkgresults,
+                            reqpo=reqpo)
+
+        for pkg in pkgresults.keys():
+            rpmdbpkgs = self.rpmdb.searchNevra(name=pkg.name)
+            if rpmdbpkgs:
+
+                newest = sorted(rpmdbpkgs)[-1]
+                if newest.verLT(pkg):
+                    pkgresults[pkg] += 5
+                elif newest.verEQ(pkg):
+                    pkgresults[pkg] += 1000
+                elif newest.verGT(pkg):
+                    pkgresults[pkg] -= 1024
+            else
+                pass   
+
+        pkgs = pkgresults.keys()
+    
+        lpos = {}
+        for po in pkgs:
+            for nextpo in pkgs:
+                if po == nextpo:
+                    continue
+
+                if po.name not in lpos:
+                    lpos[po.name] = self.pkgSack.returnNewestByName(po.name)[:1]
+                if not lpos[po.name] or not po.verEQ(lpos[po.name][0]):
+                    pkgresults[po] -= 1024
+                
+                obsoleted = False
+                if po.obsoletedBy([nextpo]):
+                    obsoleted = True
+                    pkgresults[po] -= 1024
+
+                    self.verbose_logger.log(logginglevels.DEBUG_4,
+                        _("%s obsoletes %s"),(nextpo, po))
+                if reqpo:
+                    arches = (reqpo.arch, self.arch.bsetarch)
+                else
+                    arches = (self.arch.bestarch,)
+
+                for thisarch in arches:
+                    res = _compare_arch_distance(po,nextpo, thisarch)
+                    if not res:
+                        continue
+                    self.verbose_logger(logginglevels.DEBUG_4,
+                    _('archdist compared %s to %s on %s\n Winner: %s') % (po,nextpo,thisarch,res)))
+
+                    if res == po:
+                        pkgresults[po] += 5
+            
+            # End of O(N*N) for nextpo in pkgs
+
+            #compare_providers_priority the default is 80
+            pkgresults[po] += (100 - po.repo.compare_providers_priority)  * 10
+
+
+            self.verbose_logger.log(logginglevels.DEBUG_4,
+            _('compare_providers_priority for %s is %s' % (po, po.repo.compare_providers)))
+
+            if _common_sourcerpm(po,reqpo):
+                self.verbose_logger.log(logginglevels.DEBUG_4,
+                _('common sourcerpm %s and %s' %(po,reqpo)))
+                pkgresults[po] += 20
+            if _weak_req(po,reqpo):
+
+class StartupConf(BaseConifg):
+
+    debuglevel = IntOption(2,-4,10)
+    errorlevel = IntOption(2,0,10)
+
+    distroverpkg = ListOption(['system-release(releasever)','redhat-release'])
+    installroot = Option('/')
+    config_file_path = Option('/etc/yum/yum.conf')
+    plugins = BoolOption(False)
+    pluginpath = ListOption(['/usr/share/yum-plugins','/usr/lib/yum-plugins'])
+    pluginconfpath = ListOption(['etc/yum/pluginconf.d'])
+    gaftonmode = BoolOption(False)
+    syslog_ident = Option()
+    syslog_facility = Option('LOG_USER')
+    syslog_device = Option('/dev/log')
+    persistdir = Option('/var/lib/yum')
+    skip_missing_names_on_install = BoolOption(True)
+    skip_missing_names_on_update = BaseConifg(True)
+
+from weakref import proxy as weakref
+
+#we take a real reference through the bound method impl,
+#if it was implemented in RepoStorage, we can't trace real referecne 
+#so there is reason why we implemented here separately 
+class _wrap_ayum_getKeyForRepo:
+    """
+    This is a wrapper for calling YumBase.getKeyForRepo() because
+    otherwise we take a real reference through the bound method and that is
+    doom (this applies to YumBase and RepoStorage, hence why we have a sperate class)
+    """
+    def __init__(self, ayum, ca=False):
+        self.ayum = weakref(ayum)
+        self.ca = ca
+    
+    def __call__(self, repo, callback=None):
+        if self.ca:
+            return self.ayum.getCAKeyForRepo(repo,callback)
+        return self.ayum.getKeyForRepo(repo, callback)
+
+
+
+class RepoStorage:
+    """
+        This class contains mkultiple repositories and core configuration data
+        about them.
+
+    """
+    def __init__(self, ayum):
+        self.repos = {} # list of repos by repoid pointing a repo object
+                        # of repo options/misc data
+        self.callback = None # progress callback used for populateSack() 
+                             # for importing the xml files
+
+        self.cache = 0
+        self.pkgSack = MetaSack()
+        self.logger = logging.getLogger("yum.RepoStorage")
+
+        self._setup = False
+
+        self.ayum = weakref(ayum)
+        '''
+        a primary use for weak references is to implement caches or mappings
+        holding large objects, where it's desired that a large object not be kept
+        alive soley because it appears in a cache or mapping
+
+        For example,if you have a number of large binary image objects,you
+        may wish to associate a name with each. If you used a Python dictionary
+        to map names to images, or images to names, the image objects would
+        remain alive just because they appeared as values or keys in the dictionaries.
+        The WeakKeyDictionary and WeakValueDictionary classes supplied by 
+        the weak ref module are an alternative, using weak references to construct mappings
+        don't keep objects alive solely because they appear in the mapping objects.
+        if, for example, an image object is a value in a WeakValueDictionary, then
+        when the last remaning references to that image objecvt are the weak references
+        held by weak mappings,garbage collection can reclaim the object,and its 
+        corresponding entries in weak mappings are simply deleted.
+
+        conclusion: 
+            problem:
+            a large object kept alive soley because it appears in a cache
+            or mapping,
+            
+            solution:
+            using weak ref
+            weak refer held by weak mappings,garbage collections can reclaim
+            the object,and its corresponding entires in weak mappings are simply
+            deleted.
+
+        '''
+
+
+        self.gpg_import_func = _wrap_ayum_getKeyForRepo(ayum)
+        self.gpgca_import_func = _Wrap_ayum_getKeyForRepo(ayum, ca=True)
+        self.confirm_func = None
+
+        
+        #This fallow listEnabled() to be O(1) most of the time.
+        self._cache_enabled_repos:List[Any] = []
+        self.quick_enable_disable:Dict[Any,Any] = {}
+
+        # This allows plugins to setup a repo. just before the first
+        # listEnabled() call.
+        self._list_enabled_hasrun = False
+
+    def sort(self):
+        repolist = self.repos.values()
+        repolist.sort()
+        return repolist    
+
+def doGroupSetup(self):
+    """Deprecated.No care"""
+
+    warnings.warn(_('doGroupSetup will go away in a future version of Yum.\n')),
+        Erros.YumFutureDeprecationWarning, stacklevel=2)
+
+    self.comps = None
+    return self._getGroups()
+
+def _setGroups(self,val):
+    if val is None:
+        if self._repos:
+
+            for repo in self._repos.sort():
+                repo.groups_added = False
+    
+    self.comps = vals
+
+class Environment(CompsObj):
+    """ Environment object parsed from group data in each repo, and merged """
+    def __init__(self, elem=None):
+        self.name = ""
+        self.environmentid = None
+        self.description = ""
+        self.translated_name = {}
+        self.translated_description = {}
+        self.display_order = 1024
+        self.langonly = None
+        self.installed = False
+        self._groups:Dict[Any,Any] = {}
+        self._options:Dict[Any,Any]= {}
+        self._defaultoption:Dict[Any,Any] = {}
+
+        self._weak = False
+
+        if elem:
+            self.parse(elem) 
+
+class Comps(object):
+    def __init__(self, overwrite_groups=False):
+        self._groups = {}
+        self._environments = {}
+        self._categories = {}
+        self._langpacks = Langpacks()
+        self.compscount = 0
+        self.overwirte_groups = overwrite_groups
+        self.compiled = False
+
+    def get_groups(self):
+        grps = self._groups.values()
+        grps.sort(key=lambda x: (x.display_order, x.name))
+        return grps
+    
+    
+    def get_environments(self):
+        environments = self._environments.values()
+        environments.sort(key=lambda x: (x.display_order, x.name))
+        return environments
+
+    def get_categories(self):
+        cats = self._categories.values()
+        cats.sort(key=lambda x: (x.display_order, x.name))
+        return cats
+    
+    def get_langpacks(self):
+        return self._langpacks
+
+
+
+    groups = property(get_groups)
+    environments = property(get_environments)
+    categories = property(get_categories)
+    langpacks = property(get_langpacks)
+
+
+    def return_environments(self, env_pattern, case_sensitive=False):
+        """
+            return all environments which match either by glob or exact match
+        """
+        returns  = {}
+
+        if not env_pattern:
+            return []
+
+        for item in env_pattern.split(','):
+            item = item.strip()
+            if item in self._environments:
+                env = self._environments[item]
+                returns[env.environmentid] = env
+                continue
+        
+            if case_sensitive:
+                match = re.compile(fnmatch.translate(item)).match
+            else:
+                match = re.compile(fnmatch.translate(item),flags = re.I).match
+
+            done = False
+            for env in self.environments:
+                for name in env.name, env.environmentid, env.ui_name:
+                    if match(name):
+                        done = True
+                        returns[env.environmentid] = env
+                        break
+            if done:
+                continue
+
+            for env in self.environments:
+                for name in env.translated_name.values():
+                    if match(name):
+                        returns[env.environmentsid] = env
+                        break
+    
+        return returns.values()
+
+class _YumPreBaseConf:
+
+    def __init__(self):
+            self.fn = '/etc/yum/yum.conf'
+            self.root = '/'
+            self.init_plugins = True
+            self.plugin_types = (plugins.TYPE_CORE,)
+            self.optparser = None
+            self.debuglevel = None
+            self.errorlevel = None
+            self.disabled=plugins = None
+            self.enabled_plugins = None
+            self.syslog_ident = None
+            self.syslog_facility = None
+            self.syslog_device = None
+            self.arch = None
+            self.releasever = None
+            self.uuid = None
+
+_ppc64_native_is_best = False
+
+# dict mapping arch -> ( multicompat, best personality, biarch personality )
+multilibArches = { "x86_64":  ( "athlon", "x86_64", "athlon" ),
+                   "sparc64v": ( "sparcv9v", "sparcv9v", "sparc64v" ),
+                   "sparc64": ( "sparcv9", "sparcv9", "sparc64" ),
+                   "ppc64":   ( "ppc", "ppc", "ppc64" ),
+                   "s390x":   ( "s390", "s390x", "s390" ),
+                   }
+if _ppc64_native_is_best:
+    multilibArches["ppc64"] = ( "ppc", "ppc64", "ppc64" )
+
+arches = {
+    # ia32
+    "athlon": "i686",
+    "i686": "i586",
+    "geode": "i586",
+    "i586": "i486",
+    "i486": "i386",
+    "i386": "noarch",
+    
+    # amd64
+    "x86_64": "athlon",
+    "amd64": "x86_64",
+    "ia32e": "x86_64",
+
+    #ppc64le
+    "ppc64le":  "noarch",
+
+    # ppc
+    "ppc64p7": "ppc64",
+    "ppc64pseries": "ppc64",
+    "ppc64iseries": "ppc64",    
+    "ppc64": "ppc",
+    "ppc": "noarch",
+    
+    # s390{,x}
+    "s390x": "s390",
+    "s390": "noarch",
+    
+    # sparc
+    "sparc64v": "sparcv9v",
+    "sparc64": "sparcv9",
+    "sparcv9v": "sparcv9",
+    "sparcv9": "sparcv8",
+    "sparcv8": "sparc",
+    "sparc": "noarch",
+
+    # alpha
+    "alphaev7":   "alphaev68",
+    "alphaev68":  "alphaev67",
+    "alphaev67":  "alphaev6",
+    "alphaev6":   "alphapca56",
+    "alphapca56": "alphaev56",
+    "alphaev56":  "alphaev5",
+    "alphaev5":   "alphaev45",
+    "alphaev45":  "alphaev4",
+    "alphaev4":   "alpha",
+    "alpha":      "noarch",
+
+    # arm
+    "armv7l": "armv6l",
+    "armv6l": "armv5tejl",
+    "armv5tejl": "armv5tel",
+    "armv5tel": "noarch",
+
+    #arm hardware floating point
+    "armv7hnl": "armv7hl",
+    "armv7hl": "armv6hl",
+    "armv6hl": "noarch",
+
+    # arm64
+    "arm64": "noarch",
+
+    # aarch64
+    "aarch64": "noarch",
+
+    # super-h 
+    "sh4a": "sh4",
+    "sh4": "noarch",
+    "sh3": "noarch",
+    
+    #itanium
+    "ia64": "noarch",
+    }
+
+def isMultiLibArch(arch=None):
+
+    if arch is None:
+        arch = canonArch
+    
+    if arch mnot in arches:
+        return 0
+    
+    if arch in multilibArchews:
+        return 1
+
+    if arches[arch] in multilibArches:
+        return 1
+    
+    return 0
+
+
+def legitMultiArchesInSameLib(arch=None):
+
+    arch = getBestArch(arch)
+    if isMultiLibArch(arch):
+        arch = getBaseArch(myarch=arch)
+
+    results = [arch]
+
+    if arch in ('x86_64', 'ppc64') or arch.startswith('sparcv9'):
+        for (k,v) in arches.items(): #lua style> lol
+            if v == arch:
+                results.append(k)
+
+    return results
+
+def getMultiArchInfo(arch = canonArch):
+    if arch in multilibArches:
+        return multilibArches[arch]
+    if arch in arches and arches[arch] != "noarch":
+        return getMultiArchInfo(arch = arches[arch])
+    return None
+
+
+
+
+
+def getBaseArch(myarch=None):
+
+    if not myarch:
+        myarch = canonarch
+    
+    if myarch not in arches:
+        return myarch
+
+    if myarch.startwith('sparc64'):
+        return "sparc"
+    elif myarch =="ppc64le":
+        reutrn "ppc64le"
+    elif myarch.startswith("ppc64") and not _ppc64_native_is_best:
+        return "ppc"
+    elif myarch.startswith("arm64"):
+        return "arm64"
+    elif myarch.startswith("armv6h"):
+        return "armhfp"
+    elif myarch.startswith("armv7h"):
+        return "armhfp"
+    elif myarch.startswith("arm"):
+        return "arm"
+
+    if isMultiLibArch(arch=myarch):
+        if myarch in multilibArches:
+            return myarch
+        else:
+            return arches[myarch]
+
+    if myarch in arches:
+        basearch = myarch
+        value = arches[basearch]
+        while value = != 'noarch':
+            basearch = value
+            value = arches[basearch]
+
+        return basearch
+
+
+def getCanonArch(skipRpmPlatfrom = 0):
+    if not skipRpmPlatform and os.access("/etc/rpm/platform",os.R_OK):
+        try:
+            f = open("/etc/rpm/platform","r")
+            line = f.readline()
+            f.close()
+            (arch, vendor ,opersys) = line.split("-",2)
+            return arch
+        except:
+            pass
+    
+canonArch = getCanonArch()
+
+
+
+def getArchList(thisarch=None):
+    #return a list of archs that are compat with arch given
+
+    if not thisarch:
+        thisarch = canonAarch
+    
+    archlist = [thisarch]
+    while thisarch in arches:
+        thisarch = arches[thisarch]
+        archlist.append(thisarch)
+
+    #!! sparc64v is also sparc64 compat
+    if archlist[0] == 'sparc64v':
+        archlist.insert(1,"sparc64")
+
+    #there is nothing to meet the condition so that it will be filled with noarch 
+    # add noarch on there.
+    if len(archlist) == 1 and archlist[0] == thisarch:
+        archlist.append('noarch')
+    return archlist
+
+class ArchStorage(object):
+
+    def __init__(self):
+        self.canonarch = None
+        self.basearch = None
+        self.bsetarch = None
+        self.compatarches:List[Any] = []
+        self.archlist:List[Any] = []
+        self.multilib = False
+        self.setup_arch()
+    
+    def setup_arch(self, arch=None, archlist_includes_compat_arch=True):
+        if arch:
+            self.canonarch = arch
+        else:
+            self.canonarch = canonArch
+
+        self.basearch = getBaseArch(myarch=self.canonarch)
+        self.archlist = getArchList(thisarch=self.canonarch)
+
+
+        if not archlist_includes_compat_arch:
+            limit_archlist = []
+            for a in self.archlist:
+                if isMultiLibArch(a) or a =='noarch':
+                    limit_archlist.append(a)
+            self.archlist = limit_archlist
+
+        self.bestarch = getBaseArch(myarch=self.canonarch)
+        self.compatraches = getMultiArchInfo(arch=self.canonarch)
+        self.multilib = isMultiLibArch(archself.canonarch)
+        self.legit_multi_arches = legitMultiArchesInSameLib(arch = self.canonarch )
+
+    def get_arch_list(self,arch):
+        if not arch:
+            return self.archlist
+        return getArchList(thisarch=arch)
+
+class YumBase(depsolve.Depsolve):
+
+    def __init__(self):
+        depsolve.Depsolve.__init__(self)
+        self._conf = None
+        self._tsInfo = None
+        self._rpmdb = None
+        self._up = None
+        self._comps = None
+        self._history = None
+        self._igroups = None
+        self._pkgSack = None
+        self._lockfile = None
+        self._tags = None
+        self._upinfo = None
+        self._fssnap = None
+        self._ts_save_file = None
+        self.skipped_packages = []
+        self._not_found_a = {}
+        self._not_found_i = {}
+        self.logger = logging.getLogger("yum.YumBase")
+        self.verbose_logger = logging.getLogger("yum.verbose.YumBase")
+        self.file_logger = logging.getLogger("yum.filelogging.YumBase")
+        self._ovveride_sigchecks = False
+        self._repos = RepoStorage(self)
+        self.repo_setopts = {}
+
+        self.disablePlugins()
+        
+        self.localPackages:List[any] = []
+
+        self.medigrabber = None
+        self.arch = ArchStorage()
+        self.preconf = _YumPreBaseConf()
+        self.prerepoconf = _YumPreRepoConf()
+
+        self.run_with_package_name = set()
+        self._cleanup = []
+        self.exit_code = 0
+
+        self.updateinfo_filters = {}
+    
+    def _getRepos(self, thisrepo=None, doSetup=False):
+        if hasattr(self, 'prerepoconf'):
+            self.conf # touch the config class first
+
+            if(self.conf.installroot != '/' and 
+            not hasattr(self, '_old_cachedir')):
+                ir = len(self.conf.installroot)
+                self._old_cachedir = self.conf.cachedir[ir:]
+
+            self.getReposFromConfig()
+
+
+
+    def _getSacks(self, archlist=None, thisrepo=None):
+        #already initialized pkgSack
+        if self._pkgSack is not None and thisrepo is None:
+            return self._pkgSack
+
+        if thisrepo is None:
+            repos = 'enabled'
+        else:
+            repos = self.repos.findRepos(thisrepo)
+    
+    def _getRpmDB(self):        
+        
+        if self._rpmdb is None:
+            rpmdb_st = time.time()
+            self.verbose_logger.log(logginglevels.DEBUG_4,
+                            _('Reading Local RPMDB'))
+            self._rpmdb = rpmsack.RPMDBPackageSack(root=self.conf.installroot,
+                                                releasever=self.conf.yumvar['releasever'],
+                                                persistdir=self.conf.persistdir))
+
+            self.verbose_logger.debug('rpmdb time: %0.3f' %(time.time() -rpmdb-st))
+        return self._rpmdb
+
+    repos = property(fget=lambda self: self._getRepos(),
+                     fset=lambda self, value : setattr(self,"_repos",value),
+                     fdel=lambda self: self._delRepos(),
+                     doc="Repo Storage object - object of yum repositories")
+
+
+    pkgSack = property(fget=lambda self: self._getSacks(),
+                       fset=lambda self, value: setattr(self, "_pkgSack", value),
+                       fdel=lambda self: self._delSacks(),
+                          doc="Package sack object - object of yum package objects")
+
+    rpmdb = property(fget=lambda self: self._getRpmDB(),
+                     fset=lambda self, value: setattr(self, "_rpmdb", value),
+                     fdel=lambda self: setattr(self, "_rpmdb", None),
+                     doc="RpmSack object")
+
+    conf = property(fget=lambda self: self._getConfig(),
+                    fset=lambda self, value: setattr(self, "_conf", value),
+                    fdel=lambda self: setattr(self, "_conf", None),
+
+def DoConfigSetup(self, fn='/etc/yum/yum.conf', root="/", init_plugins=True,
+plugin_types=(plugins.TYPE_CORE,), optparser=None, debuglevel=None,
+errorlevel=None):
+    """Deprecated."""
+
+    warnings.warn(_('doConfigSetup() will go away in a future version of Yum.\n'),
+    Errors.YumFutureDeprecationWarning, stacklevel=2)
+
+    if hasattr(self, 'preconf'):
+        self.preconf.fn = fn
+        self.preconf.root = root
+        self.preconf.init_plugins = init_plugins
+        self.preconf.plugin_types = plugin_types
+        self.preconf.optparser = optparser
+        self.preconf.debuglevel = devuglevel
+        self.preconf.errorlevel = errorlevel
+    
+    return self.conf
+
+def _getConfig(self, **kwargs):
+
+    if kwargs:
+        warnings.warn('Use .preconf instead of passing args to _getConfig')
+
+        if self._conf:
+            return self._conf
+        conf_st = time.time()
+
+    if kwargs:
+            for arg in ('fn','root','init_plugins',
+                        'optparser','debuglevel','errorlevel',
+                        'disabled_plugins','enabled_plugins'):
+                if arg in kwargs:
+                    setattr(self.preconf, arg, kwargs[arg])
+    
+    fn = self.preconf.fn
+    root = self.preconf.root
+    init_plugins = self.preconf.init_plugins
+    plugin_types = self.preconf.plugin_types
+    optparser = self.preconf.optparser
+    debuglevel = self.preconf.debuglevel
+    errorlevel = self.preconf.errorlevel
+    disabled_plugins = self.preconf.disabled_plugins
+    enabled_plugins = self.preconf.enabled_plugins
+    syslog_ident = self.preconf.syslog_ident
+    syslog_facility = self.preconf.syslog_facility
+    syslog_device = self.preconf.syslog_device
+    releasever = self.preconf.releasever
+    arch = self.preconf.arch
+    uuid = self.preconf.uuid
+
+    if arch:
+        self.arch.setup_arch(arch)
+    else:
+        arch = self.arch.canonarch
+    
+    if fn == '/etc/yum/yum.conf' and not os.path.exists(fn):
+        fn = '/etc/yum.conf'
+
+    startupconf = config.readStartupConfig(fn,root,releasever)
+    startupconf.arch = arch
+    startupconf.basearch = self.arch.basearch
+    if uuid:
+        startupconf.uuid = uuid
+
+    if startupconf.gaftonmode:
+        global _wrap_yum_i18n__
+        
+
+
+
+
+
+def selectEnvironment(self, evgrpid, group_package_types:Optional[List[Any]]=[],
+                    enable_group_conditionals:Optional[Any]=None, upgarde:Optional[bool]=False):
+
+        evgrps = self.comps.return_environments(evgrpid)
+        if  not evgrps:
+            raise Errors.GroupsError, _("No Environment named %s exists") % to_unicode(evgrpid)
+
+        ret:List[Any] = []
+        for evgrp in evgrps:
+
+            ievgrp = None
+            if self.conf.group_command == 'compat':
+                grps = ",".join(sorted(evgrp.groups))
+            elif self.conf.group_command == 'simple':
+                if not upgrade:
+                    grps = ",".join(sorted(evgrp.groups))
+                else:
+                    grps:List[Any] = []
+                    for grpid in evgrp.groups:
+                        grp = self.comps.return_group(grpid)
+                        if grp is None:
+                            continue
+                        if not grp.installed:
+                            continue
+                        grps.append(grpid)
+                    grps = ",".join(sorted(grps))
+            elif self.conf.group_command == "objects":
+
+
+
+ 
+def _at_groupinstall(self,pattern, upgrade=False):
+    " Do groupinstall via. leading @ on the cmd line, for install."
+    assert pattern[0] == '@' #check that
+    group_string = pattern[1:]
+    tx_return:List[Any] = []
+
+    try:
+        comps = self.comps
+    
+    except yum.Errors.GroupsError, e:
+        #No Groups Availble in any repository
+        #This also means no installed groups, when using objects.
+        self.logger.warning(e)
+        return tx_return
+    
+    found:bool = False
+
+    if group_string and group_string[0] == '^':
+        group_string = group_string[1:]
+        # dealing with "environment groups".
+        for env_grp in comps.return_environments(group_strings):
+            found = True
+            txmbrs = self.selectEnvironment(env_grp.environmentid,
+                                            upgrade=upgrade)
+            tx_return.extend(txmbrs)
+    else:
+        for group in comps.return_groups(group_string):
+            found = True
+            txmbrs = self.selectGroup(group.groupid, 
+                                        upgrade=upgrade)
+            tx_return.extend(txmbrs)
+    
+    if not found: #No Doesn't Any group Exit
+        raise Erros.GroupInstallError, _('Group %s does not exist.') % self._try_bold(group_string)
+    
+    return tx_return
+
+
+
+def _minus_deselect(self, pattern):
+    """Remove things from the transaction, like kickstart. """
+    assert pattern[0] == '-' #check that
+    pat = pattern[1:].strip #pulling up target after located at minus
+
+    if pat and pat.startswith('@^'):
+        pat = pat[2:]   #pulling up target after located at @^
+        return self.deselectEnvironment(pat)
+    
+    if pat and pat[0] == '@': #pulling up target after located at @
+        pat = pat[1:]
+        return self.deselectGroup(pat)
+
+    return self.tsInfo.deselect(pat)
+
+
+
+#packageSack type
+
+
+'''
+    packages.py
+'''
+def buildPkgRefDict(pkgs, casematch=True):
+        """take a list of pkg objects and return a dict the contains all the possible
+       naming conventions for them eg: for (name,i386,0,1,1)
+       dict[name] = (name, i386, 0, 1, 1)
+       dict[name.i386] = (name, i386, 0, 1, 1)
+       dict[name-1-1.i386] = (name, i386, 0, 1, 1)       
+       dict[name-1] = (name, i386, 0, 1, 1)       
+       dict[name-1-1] = (name, i386, 0, 1, 1)
+       dict[0:name-1-1.i386] = (name, i386, 0, 1, 1)
+       dict[name-0:1-1.i386] = (name, i386, 0, 1, 1)
+       """
+       pkgdict = {}
+       for pkg in pkgs:
+            (n,a,e,v,r) = pkg.pkgtup
+            if not casematch:
+                n = n.lower()
+                a = a.lower()
+                e = e.lower()
+                v = v.lower()
+                r = r.lower()
+            name = n
+            nameArch = '%s.%s' % (n,a)
+            nameVerRelArch = '%s-%s-%s.%s' % (n,v,r,a)
+            nameVer = '%s-%s' % (n,v)
+            nameVerRel = '%s-%s-%s' % (n,v,r)
+            envra = '%s:%s-%s-%s.%s' % (e,n,v,r,a)
+            nevra = '%s-%s:%s-%s.%s' % (n,e,v,r,a)
+            for item in [name,nameArch, nameVerRelArch, nameVer, nameVerRel, envra, nevra]:
+                if item not in pkgdict:
+                    pkgdict[item] = []
+                pkgdict[item].append(pkg)
+    
+        return pkgdict
+
+def parsePackages(pkgs,usercommands,casematch=0,
+                unique='repo-epoch-name-version-release-arch'
+                pkgdict=None):
+    
+    if pkgdict is None:
+        pkgdict = buildPkgRefDict(pkgs, bool(casematch))
+    exactmatch = []
+    matched = []
+    unmatched = []
+    for command in usercommands:
+        if not casematch:
+            command = command.lower()
+        if command in pkgdict:
+            exactmatch.extend(pkgdict[command])
+            del pkgdict[command] #dedup 
+        else:
+            if misc.re_glob(command):
+                trylist = pkgdict.keys()
+                regex = misc.compile_pattern(command)
+                foundit = 0
+                for item in trylist:
+                    if regex(item):
+                        matched.extend(pkgdict[item])
+                        del pkgdict[item]
+                        foundit = 1
+                
+                if not foundit:
+                    unmatched.append(command)
+            else:
+                unmatched.append(command)
+
+    unmatched =  misc.unique(unmatched)
+    if unique == "repo-epoch-name-version-release-arch": #pkg.__hash__
+        matched - misc.unique(matched)
+        exatcmatch = misc.unique(exactmatch)
+    elif unique == 'repo-pkgkey': #So we get all pkg enetries from a repo
+        def pkgunique(pkgs):
+            u = {}
+            for pkg in pkgs:
+                mark = "%s%s" % (pkg.repo.id, pkg.pkgKey)
+                u[mark] = pkg
+            return u.values()
+        matched = pkgunique(matched)
+        exactmatch = pkgunique(exactmatch)
+    else:
+        raise ValueError, "Bad value for unique: %s" % unique
+    return exactmatch,matched,unmatched
+
+class PackageSack(PackageSackBase):
+    """represents sets (sacks) of Package Objects"""
+    def __init__(self):
+        PackageSackBase.__init__(self) #same as Super
+        self.nevra = {} #nevra[(Name,Epoch,Version,Release,Arch)] = []
+        self.obsoletes = {}
+        self.requires = {}
+        self.provides = {}
+        self.provides = {}
+        self.conflictrs = {}
+        self.filenames = {}
+        self.pkgsByRepo = {} #pkgsByRepo['repoid'] = [pkg1,pkg2,pkg3]
+        self.pkgsByID = {} #pkgsById[pkgid] = [pkg1,pkg2]
+        self.compatarchs = None # dict of compatible archs for addPackage
+        self.indexesBuilt = 0
+
+
+    def returnPackages(self,repoid=None,patterns=None,ignore_case=False):
+
+        returnList:List[Any] = []
+        if repoid is None:
+            for repo in self.pkgsByRepo:
+                returnList.extend(self.pkgsByRepo[repo])
+        else:
+            try:
+                returnList = self.pkgsByRepo[repoid]
+            except:
+                pass
+
+        if patterns:
+            returnList = parsePackages(returnList,patterns, not ignore_case,
+                                    unique='repo-pkgkey')
+            #So we get all pkg entries from a repo
+            returnList = returnList[0] + returnList[1]
+            #exactmatch union matched
+
+        return returnList
+
+
+#constans.py
+SYMBOLFLAGS = {'>':'GT', '<':'LT', '=': 'EQ', '==': 'EQ', '>=':'GE', '<=':'LE'}
+
+
+
+#yum base install target code 
+def returnPackagesByDep(self, depstring):
+    '''
+        Return a list of package object that provide the given dependencies.
+    '''
+    if not depstring:
+        return []
+    
+    if type(depstring) == types.TupleType:
+        (depname, depflags, depver) = depstring
+    else:
+        depname = depstring
+        depflags = None
+        depver = None
+
+        if depstring[0] != '/':
+            # not a file dep - look at it for being versioned
+            dep_split = depstring.split()
+            if len(dep_split) == 3:
+                depname, flagsymbol, depver = dep_split
+                if not flagsymbol in SYMBOLFLAGS:
+                        raise Errors.YumBaseError, _('Invalid version flag from %s') $ str(depstring)
+                depflags = SYMBOLFLAGS[flagsymbol]
+
+    if depflags is None:
+        return self.pkgSack.searchProvides(depstring)
+    #return dict { packages -> list of matching provides }
+    return self.pkgSack.getProvides(depname, depflags, depver).keys()
+    
+
+
+
+def returnPackageByDep(self, depstring):
+    '''
+        Return the best, or first, package object that provides the
+        given dependencies.
+    '''
+    errstring = depstring
+    if type(depstring) not in types.StringTypes:
+        errstring = str(depstring)
+    try:
+        pkglist = self.returnPackagesByDep(depstring)
+    except Errors.YumBaseError:
+        raise Errors.YumBaseError, _('No Package found for %s') % errstring
+
+    ps = ListPackageSack(pkglist)
+    result = self._bestPackageFromList(ps.returnNewestByNameArch(),
+                                    req=errstring)
+    if result is None:
+        raise Errors.YumBaseError, _('No Package found for %s') % errstring
+    
+    return result
+
+
+def _bestPackageFromList(self, pkglist, req=None):
+    
+
+    if len(pkglist) == 0 :
+        return None
+
+    if len(pkglist) == 1:
+        return pkglist[0]
+
+    bestlist = self._compare_providers(pkglist, reqpo=None, req=req)
+    return baeslist[0][0]
+
+
+
+def bestPackagesFromList(self,pkglist,arch=None, single_name=False,
+                        req=None):
+    """
+        Return the best packages from a list of pacakges. 
+        This function is multilib aware, so that it will notpare multilib to
+        singlelib packages.
+
+        slng_name: whether to return a single package nasme
+
+    """
+    returnlist = []
+    compatArchList = self.arch.get_arch_list(arch)
+    multiLib = []
+    singleLib:List[Any] = []
+    noarch:List[Any] = []
+    for po in pkglist:
+        if po.arch not in compatArchList:
+            continue #skip
+        elif po.arch in ('noarch'):
+            multilib.append(po)
+        else:
+            singleLib.append(po)
+
+    multi = self._bestPackageFromList(multiLib,req=req)
+
+
+
+
+
+
+def install(self, po=None, **kwargs):
+    pkg_warn = kwargs.get('pkg_warning_level', 'fliblle')
+    def _dbg2(*args, **kwargs):
+        self.verbose_logger.log(logginglevels.DEBUG_2,*args, **kwargs)
+    level2func  =   {   
+                        'debug2' : _dbg2,
+                        'warning' : self.verbose_logger.warning
+                    }
+    if pkg_warn not in level2func:
+        pkg_warn = 'warning'
+    pkg_warn = level2func[pkg_warn]
+
+    pkgs:List[Any] = []
+    was_pattern = False
+    if po #if specificed package exists
+        if isinstance(po, YumAvailablePackage) or isinstance(po, YumLocalPackage):
+            pkgs.append(po)
+        else:
+            raise Erros.InstallError, _('Package Object was not a package object instance')
+    
+    else: #if specified package didn't exist        
+        if not kwargs:
+            raise Erros.InstallError, _('Nothing specified to install')
+        
+        if 'pattern' in kwargs:
+            if kwargs['pattern'] and kwargs['pattern'][0] == '-':
+                return self._minus_deselect(kwargs['pattern'])
+            
+            if kwargs['pattern'] and kwargs['pattern'][0] == '@':
+                return self._at_groupinstall(kwargs['pattern'])
+            
+            repoid = None # All of them
+            if 'repoid' in kwargs:
+                repoid = kwargs['repoid']
+            
+            was_pattern = True
+            pats = [kwargs['pattern']]
+            
+            #exactmatch union matched
+            mypkgs = self.pkgSack.returnPackages(patterns=pats,
+                                                repoid=repoid
+                                                ignore_case=False)
+                
+            if not mypkgs:
+                arg = kwargs['pattern']
+                self.verbose_logger.debug(_('Checking for virtual provide or file-provide for %s'),
+                    arg)
+
+                mypkgs = self.returnPackageByDep(arg)
+                """Return a list of package objects that provide the given dependencies. """
+                if repoid:
+                    mypkgs = misc.filter_pkgs_repoid(mypkgs,repoid)
+                if not misc.re_glob(arg):
+                    mypkgs = self.bestPackagesFromList(mypkgs,
+                                                        single_name=True,
+                                                        req=arg)
+                    pkgs.extend(mypkgs)
+
+        else:
+            nevra_dict = self._nevra_kwargs_parse(kwargs)
+
+            pkgs = self.pkgSack.searchNevra(name=nevra_dict['name'],
+                epoch=nevra_dict['epoch'],arch=nevra_dict['arch'],
+                ver=nevra_dict['version'],rel=nevra_dict['release'])
+
+            self._add_not_found_a(pkgs, nevra_dict)
+            
+            pkgs = misc.filter_pkgs_repoid(pkgs, kwargs.get('repoid'))
+    
+
+        if pkgs:
+
+            if self.arch.multilib:
+                if was_pattern or not nevra_dict['arch']:
+
+                    if self.conf.mltilib_policy == 'best':
+                        pkgs_by_name = {}
+                        use = []
+                        not_added = []
+                        best = self.arch.legit_multi_arches
+                        best.append('noarch')
+                        for pkg in pkgs:
+                            if pkg.arch in best:
+                                pkgs_by_name[pkg.name] = 1
+                                use.append(pkg)
+                            else:
+                                not_added.append(pkg)
+                        
+                        for pkg in not_added:
+                            if not pkg.name in pkgs_by_name:
+                                use.append(pkg)
+                        
+                        pkgs = use
+
+            pkgs = packagesNewestByNmae(pkgs)
+
+            pkgbyname = {}
+            for pkg in pkgs:
+                if pkg.name not in pkgbyname:
+                    pkgbyname[pkg.name] = [pkg]
+                else:
+                    pkgbyname[pkg.name].append(pkg)
+            
+            lst = []
+            for pkgs in pkgbyname.values():
+                lst.extend(self.bestPackagesFromList(pkgs))
+            pkgs = lst
+
+        if not pkgs:
+
+            if 'pattern' in kwargs:
+                arg = kwargs['pattern']
+                pkgs = self.rpmdb.returnPackages(patterns=[arg],
+                                                ignore_case=False)
+                if not pkgs:
+                    self.verbose_logger.debug(
+                        _('Checking for installed virtual provide or file-provider %s'),
+                    arg)
+                    pkgs = self.returnInstalledPackagesByDep(arg)
+            if 'name' in kwargs:
+                pkgs = self.rpmdb.searchNevra(name=kwargs['name'])
+            if 'pkgtup' in kwargs:
+                pkgs = self.rpmdb.searchNevra(name=kwargs['pkgtup'][0])
+
+            if False:
+                for pkg in pkgs:
+                    self.verbose_logger.warning(_('Package %s installed and not available'),pkg)
+            if pkgs:
+                return []
+            raise Errors.InstallError, _('No package(s) available to install')
+
+        tx_return = []
+        # no care about transaction install
